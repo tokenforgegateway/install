@@ -2,7 +2,7 @@
 # TokenForge Gateway 一键安装脚本 (Mac + Linux)
 #
 # 用法:
-#   curl -fsSL https://raw.githubusercontent.com/tokenforgegateway/install/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/tokenforgegateway/tokenforge-install/main/install.sh | sh
 #
 # 环境变量覆盖:
 #   TF_VERSION   镜像版本,默认 latest  (TF_VERSION=1.2.1 curl ... | sh)

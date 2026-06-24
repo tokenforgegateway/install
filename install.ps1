@@ -1,7 +1,7 @@
 # TokenForge Gateway 一键安装脚本 (Windows PowerShell)
 #
 # 用法:
-#   irm https://raw.githubusercontent.com/tokenforgegateway/install/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/tokenforgegateway/tokenforge-install/main/install.ps1 | iex
 #
 # 环境变量覆盖:
 #   $env:TF_VERSION   镜像版本，默认 latest
