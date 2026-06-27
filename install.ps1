@@ -7,6 +7,7 @@
 #   $env:TF_VERSION   镜像版本，默认 latest
 #   $env:TF_DIR       安装目录，默认 $HOME\tokenforge-gateway
 #   $env:TF_PORT      监听端口，默认 3080
+#   $env:TF_BIND      监听地址，默认 0.0.0.0(所有网卡，局域网可访问);设 127.0.0.1 则仅本机
 #   $env:TF_MIRROR    设为 cn 时用阿里云 ACR 镜像源(国内免翻墙)
 #
 # 依赖: Docker Desktop for Windows (https://docs.docker.com/desktop/install/windows-install/)
@@ -30,6 +31,7 @@ if ($env:TF_MIRROR -eq 'cn') {
 $Image     = "$Registry/tokenforge-gateway:$Version"
 $InstallDir = if ($env:TF_DIR) { $env:TF_DIR } else { Join-Path $HOME 'tokenforge-gateway' }
 $Port      = if ($env:TF_PORT)    { $env:TF_PORT }    else { '3080' }
+$Bind      = if ($env:TF_BIND)    { $env:TF_BIND }    else { '0.0.0.0' }
 
 function Write-Step  { Write-Host "-> $args" -ForegroundColor Cyan }
 function Write-Ok    { Write-Host "v  $args" -ForegroundColor Green }
@@ -108,7 +110,8 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - '127.0.0.1:`${TF_PORT:-3080}:3080'
+      # 监听地址由 .env 的 TF_BIND 控制(默认 0.0.0.0,局域网可访问;设 127.0.0.1 则仅本机)
+      - '`${TF_BIND:-0.0.0.0}:`${TF_PORT:-3080}:3080'
     environment:
       - NODE_ENV=production
       - TF_DB_DIALECT=pg
@@ -116,10 +119,16 @@ services:
       - REDIS_URL=redis://redis:6379
       - TF_LICENSE_KEY=`${TF_LICENSE_KEY}
       - TF_SESSION_SECRET=`${TF_SESSION_SECRET}
+      # 网关主密钥:加密落库的 sync token / 网关私钥。production 下缺失会导致序列码激活失败。
+      - GATEWAY_KEY_MASTER=`${GATEWAY_KEY_MASTER}
       - TF_LOG_LEVEL=`${TF_LOG_LEVEL:-info}
       # 序列码激活:经 tokenforge-server 注册握手(置 0 则本地激活、无需序列码)
       - TOKENFORGE_SERVER_ENABLED=`${TOKENFORGE_SERVER_ENABLED:-1}
       - TOKENFORGE_SERVER_URL=`${TOKENFORGE_SERVER_URL:-https://tokenforge.tokgoai.com}
+      # 网关访问地址展示(ADR 0047):页面按位面给候选地址。
+      - TF_PUBLIC_BASE_URL=`${TF_PUBLIC_BASE_URL:-}
+      - TF_ADVERTISE_IPS=`${TF_ADVERTISE_IPS:-}
+      - TF_ADVERTISE_PORT=`${TF_ADVERTISE_PORT:-`${TF_PORT:-3080}}
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3080/healthz']
       interval: 30s
@@ -159,7 +168,9 @@ POSTGRES_PASSWORD=$pgPw
 DATABASE_URL=postgres://tokenforge:$pgPw@db:5432/tokenforge
 TF_LICENSE_KEY=$(New-Secret)
 TF_SESSION_SECRET=$(New-Secret)
+GATEWAY_KEY_MASTER=$(New-Secret)
 TF_PORT=$Port
+TF_BIND=$Bind
 TOKENFORGE_SERVER_ENABLED=1
 TOKENFORGE_SERVER_URL=https://tokenforge.tokgoai.com
 "@
@@ -168,7 +179,31 @@ TOKENFORGE_SERVER_URL=https://tokenforge.tokgoai.com
   Write-Warn "请备份 .env 文件！丢失后数据库加密数据将永久无法恢复。"
 } else {
   Write-Ok "复用已有 .env(密钥不变)"
+  # 存量自愈:1.2.4 及更早版本的 .env 缺 GATEWAY_KEY_MASTER,补上以免序列码激活失败。
+  if (-not (Select-String -Path $envFile -Pattern '^GATEWAY_KEY_MASTER=' -Quiet)) {
+    Add-Content -Path $envFile -Value "GATEWAY_KEY_MASTER=$(New-Secret)"
+    Write-Ok "已补全缺失的 GATEWAY_KEY_MASTER"
+  }
+  # 存量自愈:旧版 .env 无 TF_BIND(老 compose 把端口写死在 127.0.0.1)。补成 0.0.0.0,升级后局域网可访问。
+  if (-not (Select-String -Path $envFile -Pattern '^TF_BIND=' -Quiet)) {
+    Add-Content -Path $envFile -Value "TF_BIND=$Bind"
+    Write-Ok "已补全 TF_BIND=$Bind(升级后局域网可访问)"
+  }
 }
+
+# ── 枚举宿主网卡 IP,注入 TF_ADVERTISE_IPS(ADR 0047)──────────────────────────
+# 过滤 docker/WSL 虚拟网卡与回环;容器内看不到宿主网卡,必须在宿主枚举后注入。
+$advertiseIps = ((Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.IPAddress -notmatch '^(127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.)' -and
+    $_.InterfaceAlias -notmatch '(?i)(vEthernet|WSL|Docker|Loopback)'
+  } |
+  Select-Object -ExpandProperty IPAddress) -join ',')
+$envLines = @(Get-Content $envFile -ErrorAction SilentlyContinue |
+  Where-Object { $_ -notmatch '^TF_ADVERTISE_IPS=' })
+$envLines += "TF_ADVERTISE_IPS=$advertiseIps"
+Set-Content -Path $envFile -Value $envLines
+Write-Ok "已注入对外候选 IP:TF_ADVERTISE_IPS=$advertiseIps"
 
 # ── 启动服务 ──────────────────────────────────────────────────────────────────
 Write-Step "启动服务..."
@@ -182,6 +217,18 @@ $actualPort = (Get-Content $envFile -ErrorAction SilentlyContinue |
   ForEach-Object { ($_ -split '=', 2)[1].Trim() } |
   Select-Object -First 1)
 if (-not $actualPort) { $actualPort = $Port }
+
+$actualBind = (Get-Content $envFile -ErrorAction SilentlyContinue |
+  Where-Object { $_ -match '^TF_BIND=' } |
+  ForEach-Object { ($_ -split '=', 2)[1].Trim() } |
+  Select-Object -First 1)
+if (-not $actualBind) { $actualBind = $Bind }
+
+# 尽力探测一个局域网 IPv4
+$lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+  Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' -and $_.PrefixOrigin -ne 'WellKnown' } |
+  Select-Object -First 1 -ExpandProperty IPAddress)
+if (-not $lanIp) { $lanIp = '<本机IP>' }
 
 $healthUrl = "http://127.0.0.1:$actualPort/healthz"
 Write-Step "等待服务就绪 ($healthUrl)..."
@@ -199,7 +246,15 @@ Write-Host ""
 if ($ready) {
   Write-Host "v  TokenForge Gateway 安装成功！" -ForegroundColor Green
   Write-Host ""
-  Write-Host "  访问地址 -> http://localhost:$actualPort"
+  Write-Host "  本机访问 -> http://localhost:$actualPort"
+  if ($actualBind -eq '0.0.0.0') {
+    Write-Host "  局域网访问 -> http://${lanIp}:$actualPort  (同网段的其他设备)"
+    Write-Host ""
+    Write-Warn "已监听所有网卡。若装在有公网 IP 的服务器上，$actualPort 端口会对公网暴露:"
+    Write-Host "      . 仅内网使用 -> 在 .env 设 TF_BIND=127.0.0.1 后 docker compose up -d"
+    Write-Host "      . 需公网访问 -> 前置反向代理(Caddy/Nginx)加 HTTPS+认证，勿裸暴露"
+    Write-Host "      . 若开了防火墙/云安全组，记得放行 $actualPort/tcp"
+  }
   Write-Host "  首次使用 -> 浏览器打开后完成开箱引导，输入序列码激活"
   Write-Host ""
   Write-Host "  安装目录: $InstallDir"
