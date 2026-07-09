@@ -16,7 +16,7 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $GhcrOwner = 'tokenforgegateway'
-$Version   = if ($env:TF_VERSION) { $env:TF_VERSION } else { '1.3.0' }
+$Version   = if ($env:TF_VERSION) { $env:TF_VERSION } else { '1.3.1' }
 
 # 镜像源:默认 GHCR(海外);国内 $env:TF_MIRROR=cn 切阿里云 ACR
 if ($env:TF_MIRROR -eq 'cn') {
@@ -111,6 +111,16 @@ services:
       retries: 5
     restart: unless-stopped
 
+  otastate-init:
+    image: `${GATEWAY_OTA_IMAGE_REPO}:`${GATEWAY_VERSION}
+    user: '0:0'
+    entrypoint: ['sh', '-lc']
+    command:
+      - 'chown -R 10001:10001 /otastate && chmod 775 /otastate'
+    volumes:
+      - otastate:/otastate
+    restart: "no"
+
   tokenforge:
     image: `${GATEWAY_IMAGE_REPO}:`${GATEWAY_VERSION}
     depends_on:
@@ -118,6 +128,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      otastate-init:
+        condition: service_completed_successfully
     ports:
       # 监听地址由 .env 的 TF_BIND 控制(默认 0.0.0.0,局域网可访问;设 127.0.0.1 则仅本机)
       - '`${TF_BIND:-0.0.0.0}:`${TF_PORT:-3080}:3080'
