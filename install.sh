@@ -14,7 +14,7 @@
 set -e
 
 GHCR_OWNER="tokenforgegateway"
-VERSION="${TF_VERSION:-1.3.1}"
+VERSION="${TF_VERSION:-1.3.2}"
 
 # ── 镜像源:默认 GHCR(海外);国内 TF_MIRROR=cn 切阿里云 ACR ──────────────────
 if [ "$TF_MIRROR" = "cn" ]; then
